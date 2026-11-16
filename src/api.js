@@ -2,7 +2,7 @@
 // It does not process them; the worker does that later (asynchronously).
 const express = require("express");
 const crypto = require("crypto");
-const { SendMessageCommand, ReceiveMessageCommand } = require("@aws-sdk/client-sqs");
+const { SendMessageCommand, ReceiveMessageCommand, DeleteMessageCommand } = require("@aws-sdk/client-sqs");
 const { sqs, queueUrl } = require("./aws");
 const config = require("./config");
 
@@ -23,6 +23,49 @@ function validateOrder(body) {
   if (!Number.isInteger(body.quantity) || body.quantity < 1)
     errors.push("quantity must be an integer >= 1");
   return errors;
+}
+
+
+// ---- Notifier: consumes the notifications queue (what SNS delivered) ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const handledNotifications = [];   // last 10 handled notifications, newest first
+
+async function notifierLoop() {
+  const url = queueUrl(config.notificationsQueueName);
+  console.log("[notifier] Started. Polling", url);
+
+  while (true) {
+    try {
+      const res = await sqs.send(new ReceiveMessageCommand({
+        QueueUrl: url,
+        MaxNumberOfMessages: 10,
+        WaitTimeSeconds: 5,            // long polling
+      }));
+
+      for (const m of res.Messages || []) {
+        try {
+          const envelope = JSON.parse(m.Body);      // SNS envelope
+          let event = envelope.Message;             // EventBridge event inside "Message"
+          try { event = JSON.parse(event); } catch (e) { /* keep as text */ }
+          const d = (event && event.detail) || {};
+
+          // In a real system this is where you would send an email or SMS.
+          console.log(`[notifier] Notification sent: order ${d.orderId} for ${d.customerName} is ${d.status}`);
+
+          handledNotifications.unshift({ topicArn: envelope.TopicArn, event });
+          if (handledNotifications.length > 10) handledNotifications.pop();
+
+          // Acknowledge = delete, only after success.
+          await sqs.send(new DeleteMessageCommand({ QueueUrl: url, ReceiptHandle: m.ReceiptHandle }));
+        } catch (err) {
+          console.error("[notifier] Failed, message left in queue for retry:", err.message);
+        }
+      }
+    } catch (err) {
+      console.error("[notifier] Cannot reach SQS, retrying in 3s:", err.message);
+      await sleep(3000);
+    }
+  }
 }
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
@@ -55,25 +98,14 @@ app.post("/orders", async (req, res) => {
 
 // GET /notifications -> PEEK at the notifications queue (to prove SNS delivered).
 // VisibilityTimeout 0 means messages are not hidden, so you can call it repeatedly.
-app.get("/notifications", async (req, res) => {
-  try {
-    const result = await sqs.send(new ReceiveMessageCommand({
-      QueueUrl: queueUrl(config.notificationsQueueName),
-      MaxNumberOfMessages: 10,
-      VisibilityTimeout: 0,
-    }));
-    const notifications = (result.Messages || []).map((m) => {
-      const snsEnvelope = JSON.parse(m.Body);   // SNS wraps what it delivers in an envelope...
-      let event = snsEnvelope.Message;          // ...and the EventBridge event is inside "Message"
-      try { event = JSON.parse(event); } catch (e) { /* keep as plain text */ }
-      return { topicArn: snsEnvelope.TopicArn, event };
-    });
-    res.json({ count: notifications.length, notifications });
-  } catch (err) {
-    console.error("[api] Could not read notifications:", err.message);
-    res.status(503).json({ error: "Could not read notifications queue" });
-  }
+// GET /notifications -> the notifications the notifier has handled (and deleted from the queue).
+
+app.get("/notifications", (req, res) => {
+  res.json({ count: handledNotifications.length, notifications: handledNotifications });
 });
+
+
+
 
 // GET /failed-orders -> peek at the dead-letter queue.
 app.get("/failed-orders", async (req, res) => {
@@ -97,3 +129,4 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(config.port, () => console.log(`[api] Listening on port ${config.port}`));
+notifierLoop();
