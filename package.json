@@ -1,0 +1,17 @@
+{
+  "name": "mini-order-system",
+  "version": "1.0.0",
+  "description": "Beginner demo: SQS + EventBridge + SNS with Node.js, running locally on Moto",
+  "main": "src/api.js",
+  "scripts": {
+    "setup": "node src/setup-aws.js",
+    "api": "node src/api.js",
+    "worker": "node src/worker.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-eventbridge": "^3.600.0",
+    "@aws-sdk/client-sns": "^3.600.0",
+    "@aws-sdk/client-sqs": "^3.600.0",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,37 @@
+services:
+  # 1) The local "fake AWS" (LocalStack). Everything is reached on port 4566.
+  localstack:
+    image: localstack/localstack:4.14   # last LocalStack release that needs no account/token
+    ports:
+      - "4566:4566"   # lets you also reach it from Windows at http://localhost:4566
+    environment:
+      - SERVICES=sqs,sns,events
+
+  # 2) One-shot job: creates queues, topic, bus, rule... then exits.
+  setup:
+    build: .
+    command: ["node", "src/setup-aws.js"]
+    env_file: .env.example
+    depends_on:
+      - localstack
+    restart: "no"
+
+  # 3) The REST API. Starts only after setup finished successfully.
+  api:
+    build: .
+    command: ["node", "src/api.js"]
+    env_file: .env.example
+    ports:
+      - "3000:3000"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  # 4) The background worker.
+  worker:
+    build: .
+    command: ["node", "src/worker.js"]
+    env_file: .env.example
+    depends_on:
+      setup:
+        condition: service_completed_successfully

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Order System</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; background: #f5f6f8; color: #222; }
+    h1 { margin-bottom: 4px; }
+    .sub { color: #666; margin-top: 0; }
+    .card { background: #fff; border-radius: 8px; padding: 16px; margin: 16px 0; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    label { display: block; margin: 8px 0 2px; font-size: 14px; }
+    input { padding: 8px; width: 100%; box-sizing: border-box; border: 1px solid #bbb; border-radius: 4px; }
+    button { margin-top: 12px; padding: 10px 18px; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; }
+    #msg { margin-top: 10px; font-size: 14px; }
+    .ok { color: #15803d; } .err { color: #b91c1c; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e5e5; }
+    .empty { color: #888; font-style: italic; }
+    .flow { font-size: 13px; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Mini Order System</h1>
+  <p class="sub">API &rarr; SQS &rarr; Worker &rarr; EventBridge &rarr; SNS &rarr; SQS (notifications). This page refreshes every 3 seconds.</p>
+
+  <div class="card">
+    <h3>1. Create an order</h3>
+    <label>Customer name</label><input id="customerName" value="John">
+    <label>Product (type FAIL to see retries + dead-letter queue)</label><input id="product" value="Laptop">
+    <label>Quantity</label><input id="quantity" type="number" min="1" value="1">
+    <button id="send">Send order</button>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h3>2. Completed orders (SNS notifications received)</h3>
+    <p class="flow">Each row arrived via EventBridge &rarr; SNS &rarr; notifications queue. Shows up to 10.</p>
+    <table>
+      <thead><tr><th>Order ID</th><th>Customer</th><th>Product</th><th>Qty</th><th>Status</th><th>Time</th></tr></thead>
+      <tbody id="notifications"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>3. Failed orders (dead-letter queue)</h3>
+    <table>
+      <thead><tr><th>Order ID</th><th>Customer</th><th>Product</th><th>Qty</th></tr></thead>
+      <tbody id="failed"></tbody>
+    </table>
+  </div>
+
+<script>
+  // Fill a table body. "cells" is a list of rows, each row a list of strings.
+  // textContent (not innerHTML) keeps user-typed names from running as HTML.
+  function fillTable(tbodyId, rows, columns) {
+    const tbody = document.getElementById(tbodyId);
+    tbody.replaceChildren();
+    if (rows.length === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = columns; td.className = "empty"; td.textContent = "Nothing yet";
+      tr.appendChild(td); tbody.appendChild(tr);
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      for (const value of row) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function refresh() {
+    try {
+      const n = await (await fetch("/notifications")).json();
+      // The order data lives in event.detail (EventBridge puts our data there).
+      const rows = (n.notifications || []).map((x) => {
+        const d = (x.event && x.event.detail) || {};
+        return [d.orderId, d.customerName, d.product, d.quantity, d.status, d.timestamp];
+      });
+      fillTable("notifications", rows, 6);
+
+      const f = await (await fetch("/failed-orders")).json();
+      fillTable("failed", (f.orders || []).map((o) => [o.orderId, o.customerName, o.product, o.quantity]), 4);
+    } catch (err) {
+      console.error("Refresh failed:", err);
+    }
+  }
+
+  document.getElementById("send").addEventListener("click", async () => {
+    const msg = document.getElementById("msg");
+    const order = {
+      customerName: document.getElementById("customerName").value,
+      product: document.getElementById("product").value,
+      quantity: Number(document.getElementById("quantity").value),
+    };
+    try {
+      const res = await fetch("/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(order),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msg.className = "ok";
+        msg.textContent = data.message + " (ID " + data.orderId + ")";
+      } else {
+        msg.className = "err";
+        msg.textContent = (data.error || "Error") + (data.details ? ": " + data.details.join(", ") : "");
+      }
+    } catch (err) {
+      msg.className = "err";
+      msg.textContent = "Could not reach the API: " + err.message;
+    }
+  });
+
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>
